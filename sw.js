@@ -1,4 +1,4 @@
-const CACHE_NAME='cap-inventory-shell-v3';
+const CACHE_NAME='cap-inventory-shell-v4';
 const SHELL=['./','./index.html','./styles.css','./app.js','./scanner.js','./manifest.webmanifest','./icons/icon192.png','./icons/icon512.png','./vendor/jszip.min.js'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE_NAME).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(Promise.all([caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE_NAME).map(k=>caches.delete(k)))),self.clients.claim()])));
