@@ -212,6 +212,21 @@ function initListeners(){
  $('newSessionTop').onclick=()=>{navigate('sessions');$('newSessionForm').querySelector('input').focus()};
  $('sessionsList').onclick=e=>{const btn=e.target.closest('[data-session-id]');if(btn){state.prefs.session=btn.dataset.sessionId;persist();render();navigate('dashboard')}};
  $('capwatchRefreshForm').addEventListener('submit',async ev=>{ev.preventDefault();await runCapwatchForm(ev.target,$('capwatchDownloadStatus'))});
+ // Normal top-level browser navigation does not use a scripted cross-origin fetch.
+ // Do not put a CAPID, password or Authorization value in the download URL.
+ $('browserZipLink').addEventListener('click',ev=>{
+   const form=$('capwatchRefreshForm');
+   const orgid=str(form.querySelector('[name="orgid"]').value);
+   const unitOnly=String(form.querySelector('[name="unitOnly"]').value);
+   if(!/^\d+$/.test(orgid)||!['0','1'].includes(unitOnly)){
+     ev.preventDefault();notify('Enter a numeric ORGID and select Unit only before opening CAPWATCH.');return;
+   }
+   const url=new URL('https://www.capnhq.gov/CAP.CapWatchAPI.Web/api/cw');
+   url.searchParams.set('ORGID',orgid);
+   url.searchParams.set('unitOnly',unitOnly);
+   ev.currentTarget.href=url.toString();
+   $('browserDownloadStatus').textContent='CAPWATCH is opening in another tab. If the server prompts for credentials, verify www.capnhq.gov. Return here and select the downloaded ZIP. If it only displays a 401/403/error, CAPWATCH may not support interactive browser downloads.';
+ });
  $('importCapwatch').onclick=async()=>{const files=$('capwatchFile').files;const btn=$('importCapwatch');btn.disabled=true;try{await importCapwatch(files);$('capwatchFile').value=''}catch(e){errorMessage(e)}finally{btn.disabled=false}};
  $('saveMapping').onclick=async()=>{for(const e of document.querySelectorAll('[data-mapping]')){const val=str(e.value).toUpperCase();if(val&&!/^[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+$/.test(val)){notify(`Charter ${val}: expected a format like RMR-MT-001.`);return}state.orgMap[e.dataset.mapping]=val}await persist();render();notify('Unit charter numbers saved.')};
  $('exportBackup').onclick=()=>exportBackup().catch(errorMessage);$('restoreBackup').onclick=()=>$('backupFile').click();$('backupFile').onchange=async e=>{const f=e.target.files?.[0];if(!f)return;try{await restoreBackupFile(f)}catch(err){errorMessage(err)}e.target.value=''};
