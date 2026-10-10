@@ -1,0 +1,15 @@
+{
+  "name": "CAP Equipment Inventory",
+  "short_name": "CAP Inventory",
+  "id": "./",
+  "description": "Encrypted offline CAP inventory: camera barcodes, tag photos, equipment history and CAPWATCH data import (direct online login requires CAPWATCH CORS).",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f6fa",
+  "theme_color": "#13396e",
+  "icons": [
+    {"src":"icons/icon192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"icons/icon512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}
