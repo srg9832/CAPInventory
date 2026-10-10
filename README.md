@@ -6,6 +6,7 @@ Installable, offline-capable Civil Air Patrol equipment inventory website. This 
 
 - Installs from `https://srg9832.github.io/CAPInventory/` using Chrome > Install app / Add to Home Screen (or iOS Safari > Share > Add to Home Screen).
 - Authenticates to CAPWATCH directly from device via HTTPS **only if CAPWATCH permits browser CORS access**. GitHub Pages cannot override CAPWATCH's cross-origin restrictions. This direct login is **not yet proven functional**.
+- Adds an experimental direct CAPWATCH browser navigation as an alternative when CORS blocks JavaScript requests. Browser navigation itself is not subject to CORS. If the CAPWATCH API responds with an HTTP Basic authentication challenge and ZIP, the user can save it to the device, then select it inside the app. This is **not yet verified** against a CAPWATCH login and it is not automatic importing.
 - Has device-only ZIP picker fallback. The ZIP is parsed locally in memory. No CAPWATCH data is sent to GitHub, a proxy, or any server.
 - Saves local encrypted equipment records, inventory history and scanned tag photos in IndexedDB (PBKDF2 SHA-256 + AES-256-GCM). Never stores the eServices password. The password used at initial local setup also unlocks the same vault offline.
 - Scans Code 39 barcode labels with the phone camera; records a photo, timestamp, matched/not-scanned status and local history. Includes manual input and CSV/encrypted backup.
