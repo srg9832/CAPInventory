@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#13396e"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="CAP Inventory">
+  <meta name="description" content="Private, offline Civil Air Patrol equipment inventory and barcode scanning.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://www.capnhq.gov; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <link rel="manifest" href="manifest.webmanifest"><link rel="icon" type="image/png" sizes="192x192" href="icons/icon192.png"><link rel="apple-touch-icon" href="icons/icon192.png">
+  <link rel="stylesheet" href="styles.css"><title>CAP Inventory</title>
+</head><body>
+  <div id="authScreen" class="auth-screen"><div class="auth-card">
+    <div class="brand-symbol">▥</div><p class="eyebrow">FIELD OPERATIONS</p><h1>CAP Equipment<br><span>Inventory</span></h1><p class="muted">Direct CAPWATCH sign-in, device-only encrypted records, and offline inventory.</p>
+    <form id="setupForm" hidden>
+      <h2>Connect to CAPWATCH</h2>
+      <p class="hint">CAPID and eServices password go directly to CAPWATCH over HTTPS. They are not saved or sent to GitHub.</p>
+      <label>CAPID<input name="capid" inputmode="numeric" autocomplete="username" required placeholder="Numeric CAPID"></label>
+      <label>eServices password<input name="cwpassword" type="password" autocomplete="current-password" required placeholder="CAPWATCH credentials"></label>
+      <div class="input-row"><label>CAPWATCH ORGID<input name="orgid" value="394" required inputmode="numeric"></label><label>Unit only<select name="unitOnly"><option value="0">No — authorized scope</option><option value="1">Yes — one unit</option></select></label></div>
+      <label>Inventory operator name<input name="name" required autocomplete="name" placeholder="Your name"></label>
+      <button class="btn primary wide" type="submit">Connect to CAPWATCH &amp; initialize inventory</button>
+      <p class="hint">Your eServices password also unlocks the encrypted local inventory when offline. It is never saved. If an API download is unavailable, use the ZIP picker in Settings if CAPWATCH blocks CORS. If your password changes, export an encrypted backup first.</p>
+    </form>
+    <form id="loginForm" hidden>
+      <h2>CAPWATCH sign in</h2>
+      <label>CAPID<input name="capid" inputmode="numeric" autocomplete="username" required placeholder="Numeric CAPID"></label>
+      <label>eServices password<input name="cwpassword" type="password" autocomplete="current-password" required placeholder="eServices password"></label>
+      <div class="input-row"><label>CAPWATCH ORGID<input name="orgid" value="394" inputmode="numeric"></label><label>Unit only<select name="unitOnly"><option value="0">No — authorized scope</option><option value="1">Yes — one unit</option></select></label></div>
+      <button class="btn primary wide" type="submit">Sign in &amp; refresh equipment</button>
+      <p class="hint">Online: authenticates and refreshes CAPWATCH on this device. Offline: the same password unlocks your existing encrypted records, without contacting CAPWATCH. Passwords are never stored.</p>
+    </form>
+    <div id="authStatus" class="alert" hidden></div>
+  </div></div>
+  <div id="app" hidden>
+    <header class="topbar"><div class="app-brand"><span class="brand-mark">▥</span><div><b>CAP INVENTORY</b><small id="profileText">Local &amp; encrypted</small></div></div><div class="top-actions"><span class="offline-indicator" id="networkText">OFFLINE READY</span><button id="lockBtn" class="icon-btn" title="Lock">🔒</button></div></header>
+    <div class="context-row"><label class="compact-label">UNIT<select id="unitSelect"></select></label><label class="compact-label">INVENTORY<select id="sessionSelect"></select></label><button id="newSessionTop" class="btn subtle mini" title="New inventory session">＋ New</button></div>
+    <main>
+      <section id="page-dashboard" class="page active"><div class="page-heading"><p class="eyebrow">CURRENT INVENTORY</p><h1>Field overview</h1><p id="dashboardSubtitle" class="muted"></p></div>
+        <div id="emptyNotice" class="callout" hidden><h3>Start with CAPWATCH data</h3><p>Sign in to CAPWATCH to download equipment directly to this device.</p><button class="btn primary" data-go="settings">CAPWATCH sign in →</button></div>
+        <div class="stat-grid"><div class="stat"><span>Assigned</span><strong id="statTotal">0</strong></div><div class="stat good"><span>Verified</span><strong id="statFound">0</strong></div><div class="stat warn"><span>Not scanned</span><strong id="statRemaining">0</strong></div><div class="stat"><span>Unexpected</span><strong id="statUnexpected">0</strong></div></div>
+        <div class="panel"><div class="panel-title"><h2>Inventory completion</h2><strong id="progressPct">0%</strong></div><div class="progress-track"><div id="progressBar" class="progress-fill"></div></div><p id="progressLabel" class="hint">Start scanning to track your progress.</p></div>
+        <div class="action-grid"><button class="action-button" data-go="scan"><span>▣</span><b>Scan equipment</b><small>Barcode + automatic photo</small></button><button class="action-button" id="outstandingButton"><span>⌕</span><b>Find outstanding</b><small>Equipment not yet scanned</small></button></div>
+        <div class="panel"><div class="panel-title"><h2>Recent scans</h2><button class="link-btn" data-go="equipment">View all →</button></div><div id="recentScans" class="records"></div></div>
+      </section>
+      <section id="page-scan" class="page"><div class="page-heading"><p class="eyebrow">BARCODE VERIFICATION</p><h1>Scan equipment</h1><p class="muted">Code 39 • Automatically save a photo of the tag with each successful scan.</p></div>
+        <div class="camera-panel"><div class="camera-stage"><video id="cameraVideo" autoplay muted playsinline></video><div class="camera-placeholder" id="cameraPlaceholder"><div class="barcode-art">▥</div><p>Camera is off</p><small>Point at the barcode label and hold steady</small></div><div class="scan-guide" id="scanGuide" hidden><span></span><span></span><span></span><span></span></div></div><div class="camera-controls"><button class="btn primary" id="startCamera">Start camera</button><button class="btn subtle" id="stopCamera" disabled>Stop camera</button><label class="inline-check"><input id="autoPhoto" type="checkbox" checked disabled> Save tag photo automatically</label></div><p class="hint" id="scannerStatus">Camera-based Code 39 scanning; tag photos save automatically.</p></div>
+        <form id="manualScanForm" class="panel"><label>Manual barcode entry (backup method)<div class="input-row"><input id="manualBarcode" type="text" placeholder="CAP2050354" autocapitalize="characters" spellcheck="false" required><button class="btn primary" type="submit">Record</button></div></label><p class="hint">Manual scans are marked as manual and will not have an automatically captured photo.</p></form>
+        <div id="lastScanBox" class="result-box" hidden></div>
+      </section>
+      <section id="page-equipment" class="page"><div class="page-heading"><p class="eyebrow">EQUIPMENT REGISTER</p><h1>Equipment</h1><p class="muted">Tap any item to view CAPWATCH history, scans, and tag photos.</p></div><div class="panel"><input id="equipmentSearch" type="search" placeholder="Search barcode, serial, description, location…"><div class="segmented" id="equipmentFilters"><button class="selected" data-filter="outstanding">Not scanned</button><button data-filter="found">Verified</button><button data-filter="all">All</button><button data-filter="unexpected">Unexpected</button></div><p class="hint" id="equipmentCount"></p><div id="equipmentList" class="records"></div></div></section>
+      <section id="page-sessions" class="page"><div class="page-heading"><p class="eyebrow">INVENTORY CYCLES</p><h1>Inventory sessions</h1><p class="muted">Each inventory is independent; previous verification history is preserved.</p></div><div class="panel"><h2>Start a new inventory</h2><form id="newSessionForm" class="input-row"><input name="name" required placeholder="e.g. Fall 2026 Annual Inventory"><button class="btn primary" type="submit">Create</button></form></div><div class="panel"><h2>Sessions for this unit</h2><div id="sessionsList" class="records"></div></div></section>
+      <section id="page-settings" class="page"><div class="page-heading"><p class="eyebrow">DATA &amp; SECURITY</p><h1>Settings</h1><p class="muted">The website hosts application code only. Your equipment records and tag photos are encrypted and stored only in this app on this device.</p></div>
+        <div class="panel"><h2>1. Download from CAPWATCH</h2><p>Enter your CAPID and eServices password. The app requests the authorized CAPWATCH ZIP <b>directly from CAPWATCH to this device</b> and extracts equipment records locally. No data is sent to GitHub or another server.</p>
+          <form id="capwatchRefreshForm"><label>CAPID<input name="capid" inputmode="numeric" autocomplete="username" required placeholder="Numeric CAPID"></label><label>eServices password<input name="cwpassword" type="password" autocomplete="current-password" required placeholder="eServices password"></label><div class="input-row"><label>ORGID<input name="orgid" value="394" inputmode="numeric" required></label><label>Unit only<select name="unitOnly"><option value="0">No</option><option value="1">Yes</option></select></label></div><button class="btn primary" type="submit">Sign in &amp; download CAPWATCH</button></form>
+          <p class="hint" id="capwatchDownloadStatus" role="status">Android APK connects natively and directly to CAPWATCH. Android handles the CAPWATCH request without browser CORS restrictions.</p>
+          <details><summary>Fallback: import a CAPWATCH ZIP already on this device</summary><p class="hint">Use this if a direct CAPWATCH download fails or you have a ZIP already. Select the ZIP or equipment TXT files. No uploads occur.</p><input id="capwatchFile" type="file" accept=".zip,.txt,.csv,application/zip" multiple><button class="btn secondary" id="importCapwatch" type="button">Import selected files</button></details>
+          <p class="hint" id="importStatus">No equipment imported yet.</p></div>
+        <div class="panel"><h2>2. Match ORGID to charter number</h2><p class="hint">Manual mapping. Enter the readable charter number for each CAPWATCH ORGID; for example <b>RMR-MT-001</b>.</p><div id="mappingList" class="records"></div><button id="saveMapping" class="btn primary">Save unit names</button></div>
+
+        <div class="panel"><h2>3. Backups and CSV</h2><p>Save encrypted backups regularly. Uninstalling the app or clearing app data deletes the local inventory.</p><div class="button-row"><button class="btn secondary" id="exportBackup">Encrypted full backup</button><button class="btn subtle" id="restoreBackup">Restore backup</button><input type="file" id="backupFile" accept=".capbackup,.json" hidden><button class="btn subtle" id="exportCsv">Export inventory CSV</button></div></div>
+        <div class="panel"><h2>Storage &amp; app</h2><p id="storageStatus" class="hint"></p><div class="button-row"><button class="btn subtle" id="persistStorage">Request persistent storage</button><button class="btn subtle" id="installButton">Install on phone</button></div><p class="hint">If Install isn't offered: Android Chrome → ⋮ → Add to Home screen / Install app; iPhone Safari → Share → Add to Home Screen.</p></div>
+        <div class="panel"><h2>Account</h2><p id="accountSummary"></p><button id="signOutButton" class="btn subtle">Lock app</button></div>
+      </section>
+    </main>
+    <nav class="bottomnav" aria-label="Pages"><button class="selected" data-go="dashboard"><span>▦</span><small>Home</small></button><button data-go="scan"><span>▣</span><small>Scan</small></button><button data-go="equipment"><span>⌕</span><small>Equipment</small></button><button data-go="sessions"><span>▤</span><small>Sessions</small></button><button data-go="settings"><span>⚙</span><small>Settings</small></button></nav>
+  </div>
+  <div class="overlay" id="detailOverlay" hidden><div class="detail-sheet"><div class="sheet-top"><strong>Equipment details</strong><button class="icon-btn" id="closeDetail" aria-label="Close">✕</button></div><div id="detailContent"></div></div></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="vendor/jszip.min.js"></script><script src="scanner.js"></script><script src="app.js"></script>
+</body></html>

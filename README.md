@@ -1,29 +1,25 @@
-# CAP Equipment Inventory — PWA (GitHub Pages)
+# CAP Inventory - Android field application
 
-Installable, offline-capable Civil Air Patrol equipment inventory website. This repository contains **application code only**: no CAPWATCH datasets, passwords, equipment records, scans, inventory reports, photos, or backups.
+Private, offline Android equipment inventory with native CAPWATCH HTTPS downloading and local encrypted storage. For one inventory operator initially; no accounts, sync services, Supabase, or CAPWATCH data in GitHub.
 
-## App
+## Build
 
-- Installs from `https://srg9832.github.io/CAPInventory/` using Chrome > Install app / Add to Home Screen (or iOS Safari > Share > Add to Home Screen).
-- Authenticates to CAPWATCH directly from device via HTTPS **only if CAPWATCH permits browser CORS access**. GitHub Pages cannot override CAPWATCH's cross-origin restrictions. This direct login is **not yet proven functional**.
-- Adds an experimental direct CAPWATCH browser navigation as an alternative when CORS blocks JavaScript requests. Browser navigation itself is not subject to CORS. If the CAPWATCH API responds with an HTTP Basic authentication challenge and ZIP, the user can save it to the device, then select it inside the app. This is **not yet verified** against a CAPWATCH login and it is not automatic importing.
-- Has device-only ZIP picker fallback. The ZIP is parsed locally in memory. No CAPWATCH data is sent to GitHub, a proxy, or any server.
-- Saves local encrypted equipment records, inventory history and scanned tag photos in IndexedDB (PBKDF2 SHA-256 + AES-256-GCM). Never stores the eServices password. The password used at initial local setup also unlocks the same vault offline.
-- Scans Code 39 barcode labels with the phone camera; records a photo, timestamp, matched/not-scanned status and local history. Includes manual input and CSV/encrypted backup.
-- Uses `equipment.txt` and `equipment_hst.txt` as text fields, preserving identifiers exactly. Org IDs mapped manually to charter numbers.
+Open `android/` in Android Studio (JDK 17, Android SDK 35). Build `:app:assembleDebug`, or use GitHub Actions → **Build Android APK** to download an installable test APK.
 
-## Security limitations
+## Use
 
-- The login source is delivered from a **public GitHub Pages origin**. Your `srg9832.github.io` pages share the same browser origin and may share browser storage with other repo sites in that domain. **A dedicated custom domain for this inventory app is strongly advised** before real CAPWATCH credentials or sensitive data.
-- Encryption protects records at rest, but the active app can access decrypted records after login; a compromised app origin/device/browser could expose them.
-- Offline PIN/password unlock isn't live eServices verification; the app cannot confirm current permissions offline.
-- Changing your eServices password makes the previous local vault password invalid, unless you retain the old password or restore an encrypted backup.
-- Removing the installed app or clearing website data can delete local inventory records. Export encrypted backups regularly. CSV export is **unencrypted**; handle it as CAPWATCH-sensitive information.
+1. Install Android APK on your phone.
+2. Enter your **numeric CAPID** (not email), eServices password, authorized ORGID, and operator name. CAPWATCH ZIP is fetched directly to this phone over HTTPS, with no proxy. First-run local vault is created only after the authenticated CAPWATCH response succeeds.
+3. Select a unit, map ORGID to `RMR-MT-001`-style charter numbers, start an inventory, and scan Code 39 equipment tags. Each scan logs a timestamp, matching result, and encrypted image of the tag.
+4. Equipment not yet scanned stays in the outstanding list. Tap an item for original CAPWATCH transaction history and inventory scan photos.
+5. Export CSV and **encrypted backups**; they remain on the phone until you explicitly choose a save destination. No automatic uploads.
 
-## Direct CAPWATCH networking
+## Storage and security
 
-Browser request is sent only to `https://www.capnhq.gov/CAP.CapWatchAPI.Web/api/cw?ORGID=…&unitOnly=…`, using a request Authorization header. The website cannot bypass the API's CORS policy or run PowerShell. **Do not enter real credentials until the deployed site and CORS behavior are verified and the CAPWATCH information-security requirements are satisfied.**
+The Android app bundles static HTML/CSS/JS privately using `WebViewAssetLoader`. The native `WebViewClient` intercepts only `/capwatch-api/cw` requests, forwards validated requests directly to `https://www.capnhq.gov/CAP.CapWatchAPI.Web/api/cw` over HTTPS with Basic authentication, and streams the response back into its locally bundled WebView. No public backend. The app accepts no redirects to protect the Authorization header.
 
-## Development
+The app uses Web Crypto AES-256-GCM and PBKDF2 (350,000 rounds) for the locally stored equipment list, history, scans and image blobs in the app WebView's private IndexedDB. The provided eServices password serves as the **local vault passphrase**; it is not stored. **Changing your eServices password does not automatically re-encrypt the vault**. Export an encrypted backup before changing your password and reinitialize the app if needed. Offline unlock checks the local passphrase, not live eServices authorization.
 
-This is a static website (`index.html`, `app.js`, `scanner.js`, `styles.css`, `sw.js`, `manifest.webmanifest`, `icons/` and vendored JSZip 3.10.1 under `vendor/`). Serve with HTTPS to enable camera and service worker features. JSZip is licensed under MIT/GPLv3; attribution is at `vendor/jszip_LICENSE.md`.
+Android app backups are disabled; screenshots are blocked; HTTP cleartext is disallowed. Both CAPWATCH data and photos remain on the phone. However CSV exports are not encrypted—handle them carefully. Avoid sharing screenshots that show the Base64 Authorization header because it contains recoverable credentials.
+
+This is a testing/debug build, not a CAP-certified system. Verify the direct CAPWATCH connection and actual camera functionality on your phone before depending on it in the field. No real credentials or CAPWATCH data should ever be committed to GitHub.
