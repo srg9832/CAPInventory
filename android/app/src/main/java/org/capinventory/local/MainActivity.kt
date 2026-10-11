@@ -8,6 +8,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.graphics.BitmapFactory
+import android.util.Base64 as AndroidBase64
+import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import android.text.InputType
 import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
@@ -36,6 +44,13 @@ import java.util.UUID
 /** Bundled website (no hosted data); native HTTPS relay is *only* to CAPWATCH, on device. */
 class MainActivity : ComponentActivity() {
     private val appHost = "appassets.androidplatform.net"
+    private val barcodeDecodeBusy = AtomicBoolean(false)
+    private val barcodeDecoder by lazy {
+        val options = BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_CODE_39, Barcode.FORMAT_CODE_128)
+            .build()
+        BarcodeScanning.getClient(options)
+    }
     private val remoteEndpoint = "https://www.capnhq.gov/CAP.CapWatchAPI.Web/api/cw"
     private lateinit var webView: WebView
     private var webPermission: PermissionRequest? = null
@@ -89,6 +104,7 @@ class MainActivity : ComponentActivity() {
         webView.settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
         webView.settings.mediaPlaybackRequiresUserGesture = true
         webView.addJavascriptInterface(Exports(), "NativeFile")
+        webView.addJavascriptInterface(BarcodeBridge(), "NativeBarcode")
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
                 val uri = request.url
@@ -203,6 +219,28 @@ class MainActivity : ComponentActivity() {
     private fun blocked() = response(403, "Forbidden", "External resources are blocked")
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
+    /** Decode actual bars using the locally bundled Google ML Kit model. No images are uploaded. */
+    inner class BarcodeBridge {
+        @JavascriptInterface fun decodeFrame(base64Jpeg: String): Boolean {
+            if (base64Jpeg.length !in 250..1800000 || !barcodeDecodeBusy.compareAndSet(false, true)) return false
+            return try {
+                val bytes = AndroidBase64.decode(base64Jpeg, AndroidBase64.DEFAULT)
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (bitmap == null) { barcodeDecodeBusy.set(false); return false }
+                barcodeDecoder.process(InputImage.fromBitmap(bitmap, 0))
+                    .addOnSuccessListener { hits ->
+                        val code = hits.firstOrNull { it.format == Barcode.FORMAT_CODE_39 || it.format == Barcode.FORMAT_CODE_128 }?.rawValue
+                        if (!code.isNullOrBlank() && ::webView.isInitialized) {
+                            runOnUiThread {
+                                webView.evaluateJavascript("window.onNativeBarcodeResult && window.onNativeBarcodeResult(${JSONObject.quote(code)})", null)
+                            }
+                        }
+                    }
+                    .addOnCompleteListener { bitmap.recycle(); barcodeDecodeBusy.set(false) }
+                true
+            } catch (_: Exception) { barcodeDecodeBusy.set(false); false }
+        }
+    }
     inner class Exports {
         /** App assets are trusted and bundled; no external pages are loaded into this WebView. */
         @JavascriptInterface fun start(filename: String, mime: String): String {
@@ -255,6 +293,7 @@ class MainActivity : ComponentActivity() {
         webPermission?.deny()
         exportInProgress?.file?.delete(); exportToSave?.file?.delete()
         if (::webView.isInitialized) webView.destroy()
+        barcodeDecoder.close()
         super.onDestroy()
     }
 }
