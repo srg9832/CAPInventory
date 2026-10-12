@@ -3,8 +3,8 @@
 const $=id=>document.getElementById(id);
 const ASSET_COLS='assetcd stkcls noun make model descrp sernum region wing unit dept inserv cost docnum fstusr fstdtm lstusr lstdtm remarks barcode nsn demil hazmat ORGID acqdate source location owner status demilinstructions PCN Encryption TrackedExpendable GreenFlag IssuedCAPID IssuedDate IssueAcceptDate'.split(' ');
 const HISTORY_COLS='stkcls noun make model descrp sernum region wing unit dept inserv cost docnum fstusr fstdtm lstusr lstdtm trnusr trndtm trntyp rec_id histid remarks barcode nsn demil hazmat ORGID acqdate source location owner status demilinstructions PCN Encryption TrackedExpendable GreenFlag IssuedCAPID IssuedDate IssueAcceptDate'.split(' ');
-const KDF_ITERATIONS=350000,DB_NAME='cap-equipment-inventory-v1';
-let db=null,key=null,state=null,saveQueue=Promise.resolve(),cameraStream=null,scanTimer=null,nativeDetector=null,scanBusy=false,frameBusy=false,scanFeedbackTimer=null,lastCode='',lastCodeAt=0,scanCandidate='',scanCandidateCount=0,scanCandidateAt=0,pendingUnknown=null,activePage='dashboard',equipmentFilter='outstanding',imageUrls=[],installPrompt=null,toastTimer=null;
+const KDF_ITERATIONS=350000,DB_NAME='cap-equipment-inventory-v1'; // v0.7 keeps the same encrypted database and backup format.
+let db=null,key=null,state=null,saveQueue=Promise.resolve(),cameraStream=null,scanTimer=null,nativeDetector=null,scanBusy=false,frameBusy=false,nativeFramePending=false,scanFeedbackTimer=null,lastCode='',lastCodeAt=0,scanCandidate='',scanCandidateCount=0,scanCandidateAt=0,pendingUnknown=null,activePage='dashboard',equipmentFilter='outstanding',imageUrls=[],installPrompt=null,toastTimer=null;
 const enc=new TextEncoder(),dec=new TextDecoder();
 const copy=e=>JSON.parse(JSON.stringify(e));
 const stamp=()=>new Date().toISOString();
@@ -24,8 +24,13 @@ const b64=bytes=>{let s='',a=u8(bytes);for(let i=0;i<a.length;i+=16384)s+=String
 const unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 function notify(message,duration=4300){const t=$('toast');t.textContent=message;t.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.hidden=true,duration)}
 function errorMessage(e){console.error(e);notify(e?.message||String(e),6500)}
-async function openDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,1);req.onupgradeneeded=()=>{const d=req.result;for(const n of ['meta','vault','photos'])if(!d.objectStoreNames.contains(n))d.createObjectStore(n,{keyPath:'id'})};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
-const dbCall=(store,method,record)=>new Promise((resolve,reject)=>{const tx=db.transaction(store,'readwrite'),rq=tx.objectStore(store)[method](record);rq.onsuccess=()=>resolve(rq.result);rq.onerror=()=>reject(rq.error)});
+async function openDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,2);req.onupgradeneeded=()=>{const d=req.result;for(const n of ['meta','vault','photos','events'])if(!d.objectStoreNames.contains(n))d.createObjectStore(n,{keyPath:'id'})};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
+const dbCall=(store,method,record)=>new Promise((resolve,reject)=>{
+ const tx=db.transaction(store,method==='get'||method==='getAll'?'readonly':'readwrite'),rq=tx.objectStore(store)[method](record);
+ rq.onerror=()=>reject(rq.error);tx.onabort=()=>reject(tx.error||Error('Device storage transaction aborted'));
+ if(method==='get'||method==='getAll')rq.onsuccess=()=>resolve(rq.result);
+ else tx.oncomplete=()=>resolve(rq.result);
+});
 const get=(store,k)=>dbCall(store,'get',k);
 const put=(store,v)=>dbCall(store,'put',v);
 const del=(store,k)=>dbCall(store,'delete',k);
@@ -38,8 +43,31 @@ async function createAccount(name,capid,pass){const salt=crypto.getRandomValues(
  await put('meta',{id:'config',salt:Array.from(salt),iterations:KDF_ITERATIONS,check});await put('vault',{id:'state',...record});key=vaultKey;state=initial;activateApp()}
 async function unlock(pass){const config=await get('meta','config');if(!config)throw Error('This device is not set up yet.');const possible=await deriveKey(pass,config.salt,config.iterations);
  let verifier;try{verifier=dec.decode(await unseal(config.check,possible))}catch{throw Error('Incorrect passphrase. Please try again.')}
- if(verifier!=='CAP_INVENTORY_V1')throw Error('Incorrect passphrase.');const record=await get('vault','state');if(!record)throw Error('Encrypted inventory records are missing.');const decrypted=JSON.parse(dec.decode(await unseal(record,possible)));key=possible;state=decrypted;if(reconcileScanMatches())await persist();activateApp()}
-function persist(){if(!state||!key)return Promise.resolve();const snapshot=JSON.stringify(state);saveQueue=saveQueue.catch(()=>{}).then(async()=>{const data=await seal(snapshot);await put('vault',{id:'state',...data})});return saveQueue}
+ if(verifier!=='CAP_INVENTORY_V1')throw Error('Incorrect passphrase.');const record=await get('vault','state');if(!record)throw Error('Encrypted inventory records are missing.');const decrypted=JSON.parse(dec.decode(await unseal(record,possible)));key=possible;state=decrypted;
+ // v0.6 stored scan events within the large encrypted equipment snapshot. Migrate them once.
+ // Write events BEFORE clearing the old snapshot so an interrupted migration can safely retry.
+ const legacy=Array.isArray(state.scans)?state.scans:[];
+ const rows=await getAll('events'),saved=new Map();
+ for(const row of rows){const ev=JSON.parse(dec.decode(await unseal(row)));saved.set(ev.id,ev)}
+ if(legacy.length){await upsertScanEvents(legacy.filter(ev=>!saved.has(ev.id)));}
+ state.scans=[...new Map([...legacy,...saved.values()].map(ev=>[ev.id,ev])).values()];
+ const updated=reconcileScanMatches();
+ if(updated)await upsertScanEvents(state.scans);
+ if(legacy.length)await persist();
+ activateApp()}
+// Keep equipment/history in the encrypted vault; scan events live in their own encrypted
+// IndexedDB store. Verifying each item no longer serializes/encrypts all CAPWATCH rows.
+function persist(){if(!state||!key)return Promise.resolve();const snapshot=JSON.stringify({...state,scans:[]});saveQueue=saveQueue.catch(()=>{}).then(async()=>{const data=await seal(snapshot);await put('vault',{id:'state',...data})});return saveQueue}
+async function encryptEvent(ev){return {id:ev.id,...await seal(JSON.stringify(ev))}}
+function commitEventBatch(records,replace=false){return new Promise((resolve,reject)=>{
+ const tx=db.transaction('events','readwrite'),store=tx.objectStore('events');
+ if(replace)store.clear();
+ for(const row of records)store.put(row);
+ tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error||Error('Could not save inventory scans'));tx.onabort=()=>reject(tx.error||Error('Inventory scan transaction aborted'));
+ })}
+async function upsertScanEvents(events){if(!events.length)return;const records=await Promise.all(events.map(encryptEvent));await commitEventBatch(records)}
+async function replaceScanEvents(events){const records=await Promise.all(events.map(encryptEvent));await commitEventBatch(records,true)}
+async function saveScanEvent(event){await commitEventBatch([await encryptEvent(event)])}
 async function storePhoto(blob){if(!blob)return null;const identifier=id(),data=new Uint8Array(await blob.arrayBuffer()),sealed=await seal(data);await put('photos',{id:identifier,...sealed,mime:blob.type||'image/jpeg',createdAt:stamp()});return identifier}
 async function loadPhotoData(identifier){const photo=await get('photos',identifier);if(!photo)return null;return {blob:new Blob([await unseal(photo)],{type:photo.mime}),mime:photo.mime}}
 async function photoUrl(identifier){if(!identifier)return null;try{const data=await loadPhotoData(identifier);if(!data)return null;const url=URL.createObjectURL(data.blob);imageUrls.push(url);return url}catch(e){console.warn(e);return null}}
@@ -90,6 +118,7 @@ async function importCapwatch(files){const chosen=Array.from(files);if(!chosen.l
  state.assets=assets;state.history=history;
  // Recheck imported equipment against existing scans without discarding exceptions.
  for(const e of state.scans){const matched=findAsset(e.barcode,e.orgid);if(matched.result==='found'){e.assetKey=matched.asset._key;e.result='found'}else{e.assetKey=null;e.result='unexpected'}}
+ await upsertScanEvents(state.scans);
  state.lastImport={at:stamp(),assets:assets.length,history:history.length,repeated};if(!state.prefs)state.prefs={unit:'',session:''};for(const a of assets)if(!(str(a.ORGID)in state.orgMap))state.orgMap[str(a.ORGID)]='';await persist();render();notify(`Imported ${assets.length.toLocaleString()} equipment items and ${history.length.toLocaleString()} history entries.${repeated?` ${repeated} duplicate identifiers; review data.`:''}`,7500)}
 /* Direct credentialed CAPWATCH download. Browser CORS policy cannot be bypassed by a static PWA.
  * Credentials are held only in this call, not saved to IndexedDB, URLs, or reports.
@@ -156,19 +185,25 @@ function reconcileScanMatches(){
  return changed;
 }
 async function recordScan(barcode,options={}){
- const code=norm(barcode);if(!code)throw Error('Barcode is required.');if(!getUnit())throw Error('Import equipment and select a unit before scanning.');const session=ensureSession(),match=findAsset(code);let photoId=null;
+ const code=norm(barcode);if(!code)throw Error('Barcode is required.');if(!getUnit())throw Error('Import equipment and select a unit before scanning.');const hadSession=!!getSession(),session=ensureSession(),match=findAsset(code);if(!hadSession)await saveQueue;let photoId=null;
  if(options.imageBlob)try{photoId=await storePhoto(options.imageBlob)}catch(e){console.error(e);notify('Barcode read, but photo could not be saved. Check device storage.',7000)}
  if(match.result==='ambiguous')throw Error(`This identifier matches ${match.duplicates} equipment records in this unit. Resolve the duplicate CAPWATCH records before verifying.`);const actualResult=match.result==='found'?'found':'unexpected';const e={id:id(),sessionId:session.id,orgid:getUnit(),barcode:code,assetKey:match.asset?match.asset._key:null,result:actualResult,at:stamp(),method:options.method||'manual',photoId,by:{name:state.profile.name,capid:state.profile.capid,deviceId:state.profile.deviceId},note:match.result==='other-unit'?`Barcode assigned to another unit: ${match.other.join(', ')}`:''};
- state.scans.push(e);await persist();renderDashboard();if(activePage==='equipment')renderEquipment();if(activePage==='sessions')renderSessions();$('lastScanBox').hidden=false;$('lastScanBox').classList.toggle('error',actualResult!=='found');
+ await saveScanEvent(e);state.scans.push(e);renderDashboard();if(activePage==='equipment')renderEquipment();if(activePage==='sessions')renderSessions();$('lastScanBox').hidden=false;$('lastScanBox').classList.toggle('error',actualResult!=='found');
  const previous=state.scans.some(x=>x.id!==e.id&&x.sessionId===session.id&&x.barcode===code&&x.result==='found');const label=match.asset?.noun||match.asset?.descrp||'Equipment';$('lastScanBox').innerHTML=actualResult==='found'?`<h2>✓ ${previous?'Already verified — rescanned':'Equipment verified'}</h2><p><b>${esc(code)}</b> • ${esc(label)}</p><p class="hint">${esc(match.asset?.make||'')} ${esc(match.asset?.model||'')} • Serial: ${esc(match.asset?.sernum||'N/A')} • ${photoId?'Photo saved':'No photo'}</p><button class="btn subtle mini" data-item="${esc(match.asset._key)}">View equipment →</button>`:`<h2>⚠ ${match.result==='other-unit'?'Assigned to another unit':'Barcode not found'}</h2><p><b>${esc(code)}</b></p><p class="hint">${esc(e.note||'This barcode is not in the imported equipment list for the selected unit. Logged as an exception.')}${photoId?' • Photo saved':''}</p>`;
  notify(actualResult==='found'?`${code} verified${photoId?' • tag photo saved':''}`:`${code} logged as an exception`,5500);if(navigator.vibrate)navigator.vibrate(actualResult==='found'?60:[80,70,80]);return e}
-async function captureFrame(){
+// Draw the live video frame synchronously; the image is frozen at this point.
+// JPEG compression happens AFTER the on-screen flash and need not delay capture feedback.
+function snapshotFrame(){
  if(!cameraStream)return null;
  const video=$('cameraVideo');if(video.readyState<2)return null;
- const c=document.createElement('canvas'),max=1600,scale=Math.min(1,max/Math.max(video.videoWidth,video.videoHeight));
- c.width=Math.round(video.videoWidth*scale);c.height=Math.round(video.videoHeight*scale);
- c.getContext('2d').drawImage(video,0,0,c.width,c.height);
- return await new Promise(r=>c.toBlob(r,'image/jpeg',.76));
+ const canvas=document.createElement('canvas'),max=1600,scale=Math.min(1,max/Math.max(video.videoWidth,video.videoHeight));
+ canvas.width=Math.max(1,Math.round(video.videoWidth*scale));canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
+ canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+ return canvas;
+}
+async function encodeSnapshot(canvas){if(!canvas)return null;
+ try{return await new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(Error('Camera JPEG encoding failed')),'image/jpeg',0.76))}
+ finally{canvas.width=0;canvas.height=0}
 }
 function scannerFeedback(message='',phase='',duration=0){
  clearTimeout(scanFeedbackTimer);scanFeedbackTimer=null;
@@ -206,9 +241,10 @@ async function handleBarcodeFromCamera(code){
    }
    $('scannerStatus').textContent=`${clean} read — capturing the tag image…`;
    scannerFeedback(`Barcode read: ${clean} · Capturing photo…`,'capture');
-   const imageBlob=await captureFrame();
-   // Flash ONLY after the photograph has actually been captured.
-   if(imageBlob)flashCapturedPhoto();
+    const photoFrame=snapshotFrame();
+    // The frame has been frozen. Flash NOW, not after asynchronous JPEG compression.
+    if(photoFrame){flashCapturedPhoto();scannerFeedback(`Photo captured · Processing ${clean}…`,'capture')}
+    const imageBlob=await encodeSnapshot(photoFrame);
    if(match.result!=='found'){
      pendingUnknown={code:clean,imageBlob};
      const reason=match.result==='other-unit'?`This tag belongs to ${match.other.join(', ')}.`:match.result==='ambiguous'?`This identifier matches ${match.duplicates} equipment records.`:'This identifier was not found in the selected unit. Reposition the label and scan again, or confirm an exception.';
@@ -240,10 +276,11 @@ function candidateFromCamera(raw,source='native'){
  handleBarcodeFromCamera(code).catch(errorMessage);
 }
 window.onNativeBarcodeResult=raw=>candidateFromCamera(raw,'native');
+window.onNativeBarcodeReady=()=>{nativeFramePending=false};
 async function startCamera(){
  if(cameraStream)return;
  if(!state?.assets?.length||!getUnit())throw Error('Download CAPWATCH equipment and select the inventory unit before starting the camera.');
- pendingUnknown=null;scanCandidate='';scanCandidateCount=0;lastCode='';lastCodeAt=0;
+ pendingUnknown=null;scanCandidate='';scanCandidateCount=0;nativeFramePending=false;lastCode='';lastCodeAt=0;
  const video=$('cameraVideo');
  if(!navigator.mediaDevices?.getUserMedia)throw Error('Camera access is not available on this device.');
  try{
@@ -263,14 +300,18 @@ async function scanFrame(){
  frameBusy=true;
  try{
    if(window.NativeBarcode?.decodeFrame){
-     // ML Kit receives a smaller frame for faster decode. Save high-res photo separately upon recognition.
-     const canvas=document.createElement('canvas'),max=1280,scale=Math.min(1,max/Math.max(video.videoWidth,video.videoHeight));
-     canvas.width=Math.max(1,Math.round(video.videoWidth*scale));canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
-     canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
-     window.NativeBarcode.decodeFrame(canvas.toDataURL('image/jpeg',0.72).split(',')[1]);
-     return;
-   }
-   let code=null;
+   // Do not JPEG-encode another frame while ML Kit is still decoding the last one.
+   if(nativeFramePending)return;
+   const canvas=document.createElement('canvas'),max=1000,scale=Math.min(1,max/Math.max(video.videoWidth,video.videoHeight));
+   canvas.width=Math.max(1,Math.round(video.videoWidth*scale));canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
+   canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+   nativeFramePending=true;
+   try{if(!window.NativeBarcode.decodeFrame(canvas.toDataURL('image/jpeg',0.67).split(',')[1]))nativeFramePending=false}
+   catch(e){nativeFramePending=false;throw e}
+   canvas.width=0;canvas.height=0;
+   return;
+  }
+  let code=null;
    if(nativeDetector){const detected=await nativeDetector.detect(video);code=detected.find(d=>d.rawValue)?.rawValue||null}
    if(!code){const canvas=document.createElement('canvas'),lim=1400,scale=Math.min(1,lim/Math.max(video.videoWidth,video.videoHeight));canvas.width=Math.max(1,Math.round(video.videoWidth*scale));canvas.height=Math.max(1,Math.round(video.videoHeight*scale));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(video,0,0,canvas.width,canvas.height);code=Code39Fallback.decodeImageData(ctx.getImageData(0,0,canvas.width,canvas.height))}
    if(code)candidateFromCamera(code,'web');
@@ -279,7 +320,7 @@ async function scanFrame(){
 function stopCamera(){
  if(scanTimer){clearInterval(scanTimer);scanTimer=null}
  if(cameraStream)for(const t of cameraStream.getTracks())t.stop();
- cameraStream=null;frameBusy=false;nativeDetector=null;pendingUnknown=null;
+ cameraStream=null;frameBusy=false;nativeFramePending=false;nativeDetector=null;pendingUnknown=null;
  clearTimeout(scanFeedbackTimer);scanFeedbackTimer=null;
  $('scanFeedback').hidden=true;$('captureFlash').classList.remove('visible');
  $('cameraVideo').srcObject=null;$('cameraPlaceholder').hidden=false;$('scanGuide').hidden=true;
@@ -294,18 +335,21 @@ async function deleteUnexpected(eventId){
  const event=state.scans.find(s=>s.id===eventId&&s.result==='unexpected'&&s.sessionId===getSession()?.id);
  if(!event)return;
  if(!confirm(`Remove the incorrect reading ${event.barcode} from this inventory?`))return;
+ await del('events',eventId);
  state.scans=state.scans.filter(s=>s.id!==eventId);
  if(event.photoId&&!state.scans.some(s=>s.photoId===event.photoId))await del('photos',event.photoId);
- await persist();render();notify('Incorrect scan removed.');
+ render();notify('Incorrect scan removed.');
 }
 async function clearUnexpected(){
  const session=getSession();if(!session)return;
  const invalid=state.scans.filter(s=>s.sessionId===session.id&&s.result==='unexpected');
  if(!invalid.length){notify('No exceptions to remove in this inventory.');return}
  if(!confirm(`Remove ${invalid.length} unverified scan(s) from this inventory? Verified equipment will not be changed.`))return;
- const ids=new Set(invalid.map(x=>x.id));state.scans=state.scans.filter(s=>!ids.has(s.id));
+ const ids=new Set(invalid.map(x=>x.id));
+ await new Promise((resolve,reject)=>{const tx=db.transaction('events','readwrite'),store=tx.objectStore('events');for(const event of invalid)store.delete(event.id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});
+ state.scans=state.scans.filter(s=>!ids.has(s.id));
  for(const event of invalid)if(event.photoId&&!state.scans.some(s=>s.photoId===event.photoId))await del('photos',event.photoId);
- await persist();render();notify(`${invalid.length} exceptions removed.`);
+ render();notify(`${invalid.length} exceptions removed.`);
 }
 async function openUnexpected(eventId){const e=state.scans.find(x=>x.id===eventId);if(!e)return;clearPhotoUrls();const url=await photoUrl(e.photoId);$('detailContent').innerHTML=`<div class="detail-section"><h1>Unexpected barcode</h1><p class="badge unexpected">Not matched</p><h2>${esc(e.barcode)}</h2><p>${esc(e.note||'Not in assigned equipment list.')}</p><p class="muted">${esc(nameForUnit(e.orgid))}<br>${esc(displayTime(e.at))}<br>Recorded by ${esc(e.by?.name||'Unknown')}</p>${url?`<img class="photo" alt="Unexpected equipment barcode" src="${url}">`:'<p class="hint">No photograph saved.</p>'}</div>`;$('detailOverlay').hidden=false}
 /* Encrypted export files: new independent passphrase, salted PBKDF2, AES-256-GCM. */
@@ -331,7 +375,7 @@ async function saveRestoredPhotos(photos){let count=0;for(const p of photos||[])
 async function askPassphrase(action){const pass=prompt(`${action}\n\nEnter a backup passphrase (at least 12 characters). You will need it to restore the backup. Do not reuse your eServices password.`);if(pass===null)return null;if(pass.length<12)throw Error('Export passphrase must contain at least 12 characters.');return pass}
 async function exportBackup(){const pass=await askPassphrase('COMPLETE ENCRYPTED BACKUP');if(pass===null)return;const photos=await collectPhotos(state.scans);const payload={kind:'full-backup',version:1,exportedAt:stamp(),state:copy(state),photos};const data=await encryptPackage(payload,pass,'full-backup');await downloadFile(data,`CAP_Inventory_Backup_${new Date().toISOString().slice(0,10)}.capbackup`,'application/json');notify(`Backup exported: ${photos.length} encrypted tag photos`)}
 async function restoreBackupFile(file){const pass=prompt('Enter the backup export passphrase:');if(pass===null)return;const packageData=await decryptPackage(await file.text(),pass,'full-backup');if(packageData.kind!=='full-backup'||!packageData.state||!Array.isArray(packageData.state.assets)||!Array.isArray(packageData.state.scans))throw Error('Backup content is incomplete.');if(!confirm('RESTORE BACKUP? This replaces the equipment, maps, inventory sessions and scans on THIS DEVICE. Your local operator profile will be preserved. Export a backup of current data first if needed.'))return;
- const originalProfile=copy(state.profile);const replacement=copy(packageData.state);replacement.profile=originalProfile;replacement.prefs=replacement.prefs||{unit:'',session:''};replacement.orgMap=replacement.orgMap||{};replacement.sessions=replacement.sessions||[];replacement.history=replacement.history||[];state=replacement;const count=await saveRestoredPhotos(packageData.photos);await persist();render();notify(`Backup restored. ${state.assets.length} items and ${count} photos restored.`,7900)}
+ const originalProfile=copy(state.profile);const replacement=copy(packageData.state);replacement.profile=originalProfile;replacement.prefs=replacement.prefs||{unit:'',session:''};replacement.orgMap=replacement.orgMap||{};replacement.sessions=replacement.sessions||[];replacement.history=replacement.history||[];const count=await saveRestoredPhotos(packageData.photos);await replaceScanEvents(replacement.scans);state=replacement;await persist();render();notify(`Backup restored. ${state.assets.length} items and ${count} photos restored.`,7900)}
 function csvCell(value){let v=String(value??'');if(/^[=+\-@\t\r]/.test(v))v="'"+v;return '"'+v.replaceAll('"','""')+'"'}
 async function exportCsv(){const summary=scanSummary(),session=getSession(),header=['Charter','ORGID',...ASSET_COLS,'InventoryResult','LastScannedAt','LastScannedBy','InventoryName'];const records=summary.assets.map(a=>{let scan=summary.latest.get(a._key);return [nameForUnit(a.ORGID),a.ORGID,...ASSET_COLS.map(k=>a[k]),summary.verified.has(a._key)?'Verified':'Not scanned',scan?.at||'',scan?.by?.name||'',session?.name||'']});for(const e of summary.unknown)records.push([nameForUnit(e.orgid),e.orgid,...ASSET_COLS.map(k=>k==='barcode'?e.barcode:''),'Unexpected scan',e.at,e.by?.name||'',session?.name||'']);const csv='\uFEFF'+[header,...records].map(row=>row.map(csvCell).join(',')).join('\r\n');await downloadFile(csv,`CAP_Inventory_${filenameSafe(nameForUnit(getUnit()))}_${new Date().toISOString().slice(0,10)}.csv`,'text/csv;charset=utf-8');notify(`CSV exported: ${records.length} rows`)}
 function startSession(name){if(!getUnit())throw Error('Import equipment and select a unit first.');const newName=str(name);if(!newName)throw Error('Give this inventory a name.');const same=state.sessions.find(s=>s.orgid===getUnit()&&s.name.toLowerCase()===newName.toLowerCase());if(same)throw Error('An inventory with that name already exists for this unit.');const session={id:id(),orgid:getUnit(),name:newName,createdAt:stamp()};state.sessions.push(session);state.prefs.session=session.id;persist();render();notify(`New inventory started: ${newName}`)}

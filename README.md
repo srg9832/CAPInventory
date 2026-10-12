@@ -1,3 +1,13 @@
+# CAP Inventory v0.7 — scan responsiveness and encrypted scan journal
+
+- Camera frame freezes immediately after a confirmed barcode and capture flash displays **before** JPEG encoding.
+- Photo JPEG conversion and encryption continue with visible processing/saving feedback.
+- Encrypted scan events are now separate IndexedDB records rather than re-encrypting the entire CAPWATCH equipment/history database after every barcode.
+- v0.6 encrypted inventory state and encrypted backups remain compatible; on first unlock, existing scan records migrate safely to the new event store.
+- ZIP reimports reconcile both in-memory scans and their individual encrypted records; backup/restore and deleting false exceptions handle the new event store.
+- Only code is published to GitHub. CAPWATCH ZIPs, password and inventory data remain on the phone.
+- Android version 0.7.0 (versionCode 7). GitHub CI debug APK is not reliably signed with the same key as v0.6. Export an encrypted backup **before** uninstalling v0.6.
+
 # CAP Equipment Inventory — GitHub Pages + Native Android
 
 Two front ends, sharing exactly the same on-device inventory code:

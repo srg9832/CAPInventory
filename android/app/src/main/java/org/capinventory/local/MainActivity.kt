@@ -236,7 +236,12 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
-                    .addOnCompleteListener { bitmap.recycle(); barcodeDecodeBusy.set(false) }
+                    .addOnCompleteListener {
+                        bitmap.recycle(); barcodeDecodeBusy.set(false)
+                        if (::webView.isInitialized) runOnUiThread {
+                            webView.evaluateJavascript("window.onNativeBarcodeReady && window.onNativeBarcodeReady()", null)
+                        }
+                    }
                 true
             } catch (_: Exception) { barcodeDecodeBusy.set(false); false }
         }
